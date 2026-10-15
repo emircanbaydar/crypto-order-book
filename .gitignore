@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+.vscode/git rm -r --cached __pycache__
+git add .gitignore
+git commit -m "chore: add .gitignore and remove pycache"
+git push origin main
