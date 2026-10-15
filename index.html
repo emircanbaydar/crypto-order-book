@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>Crypto Order Book & Matching Engine</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
+    body { background-color: #0b0e11; color: #eaecef; padding: 20px; }
+    h1 { font-size: 20px; margin-bottom: 16px; color: #f0b90b; }
+    .container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1100px; margin: 0 auto; }
+    .card { background-color: #181a20; border-radius: 8px; padding: 16px; border: 1px solid #2b313a; }
+    h2 { font-size: 15px; margin-bottom: 12px; color: #848e9c; text-transform: uppercase; }
+    
+    /* Order Book Tablosu */
+    .book-grid { display: flex; flex-direction: column; gap: 6px; }
+    .table-header, .row { display: grid; grid-template-columns: 1fr 1fr; font-size: 13px; padding: 4px 8px; }
+    .table-header { color: #848e9c; font-weight: bold; border-bottom: 1px solid #2b313a; }
+    .row.ask { color: #f6465d; background: rgba(246, 70, 93, 0.08); border-radius: 4px; }
+    .row.bid { color: #0ecb81; background: rgba(14, 203, 129, 0.08); border-radius: 4px; }
+    .spread-bar { text-align: center; font-size: 14px; font-weight: bold; padding: 8px; margin: 6px 0; background: #2b313a; border-radius: 4px; color: #f0b90b; }
+    
+    /* İşlem Akışı */
+    .trades-list { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .trade-item { display: grid; grid-template-columns: 1fr 1fr 1fr; font-size: 12px; padding: 4px 8px; border-bottom: 1px solid #23272e; }
+
+    /* Emir Gönderme Paneli */
+    .form-panel { grid-column: span 2; display: flex; gap: 12px; align-items: flex-end; background: #181a20; padding: 16px; border-radius: 8px; border: 1px solid #2b313a; }
+    .input-group { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+    label { font-size: 12px; color: #848e9c; }
+    input, select { background: #2b313a; border: 1px solid #474d57; color: #fff; padding: 8px 12px; border-radius: 4px; font-size: 14px; outline: none; }
+    button { padding: 10px 20px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+    .btn-buy { background-color: #0ecb81; color: #fff; }
+    .btn-buy:hover { background-color: #0ba368; }
+    .btn-sell { background-color: #f6465d; color: #fff; }
+    .btn-sell:hover { background-color: #d9384f; }
+    .badge { display: inline-block; padding: 2px 6px; font-size: 11px; border-radius: 4px; }
+    .badge-online { background: #0ecb81; color: #000; }
+    .badge-offline { background: #f6465d; color: #fff; }
+  </style>
+</head>
+<body>
+
+  <div style="max-width: 1100px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center;">
+    <h1>⚡ Real-Time Order Book Engine</h1>
+    <span id="ws-status" class="badge badge-offline">Bağlantı Kesildi</span>
+  </div>
+
+  <div class="container">
+    <!-- SOL: Sipariş Defteri -->
+    <div class="card">
+      <h2>Derinlik Tablosu (L2 Order Book)</h2>
+      <div class="book-grid">
+        <div class="table-header"><span>Fiyat (USDT)</span><span style="text-align:right;">Miktar</span></div>
+        <div id="asks-list"></div>
+        <div class="spread-bar" id="spread-box">Makas: -</div>
+        <div id="bids-list"></div>
+      </div>
+    </div>
+
+    <!-- SAĞ: Canlı Gerçekleşen İşlemler -->
+    <div class="card">
+      <h2>Canlı İşlem Akışı (Trade Feed)</h2>
+      <div class="table-header" style="grid-template-columns: 1fr 1fr 1fr;">
+        <span>Fiyat</span><span style="text-align:center;">Adet</span><span style="text-align:right;">Zaman</span>
+      </div>
+      <div class="trades-list" id="trades-list"></div>
+    </div>
+
+    <!-- ALT: Hızlı Emir Gönderme -->
+    <div class="form-panel">
+      <div class="input-group">
+        <label>Emir Tipi</label>
+        <select id="order-type" onchange="togglePriceInput()">
+          <option value="LIMIT">LIMIT</option>
+          <option value="MARKET">MARKET</option>
+        </select>
+      </div>
+      <div class="input-group" id="price-group">
+        <label>Fiyat</label>
+        <input type="number" id="order-price" step="0.01" value="105.00">
+      </div>
+      <div class="input-group">
+        <label>Miktar</label>
+        <input type="number" id="order-qty" step="0.1" value="1.0">
+      </div>
+      <button class="btn-buy" onclick="sendOrder('BUY')">ALIŞ (BUY)</button>
+      <button class="btn-sell" onclick="sendOrder('SELL')">SATIŞ (SELL)</button>
+    </div>
+  </div>
+
+  <script>
+    const wsStatus = document.getElementById("ws-status");
+    const asksList = document.getElementById("asks-list");
+    const bidsList = document.getElementById("bids-list");
+    const spreadBox = document.getElementById("spread-box");
+    const tradesList = document.getElementById("trades-list");
+
+    // WebSocket Bağlantısı
+    const socket = new WebSocket(`ws://${window.location.host}/ws`);
+
+    socket.onopen = () => {
+      wsStatus.textContent = "Canlı Yayın Aktif";
+      wsStatus.className = "badge badge-online";
+    };
+
+    socket.onclose = () => {
+      wsStatus.textContent = "Bağlantı Kesildi";
+      wsStatus.className = "badge badge-offline";
+    };
+
+    socket.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "orderbook_snapshot" || data.type === "orderbook_update") {
+        renderOrderBook(data.payload);
+      } else if (data.type === "trades") {
+        renderTrades(data.payload);
+      }
+    };
+
+    function renderOrderBook(book) {
+      // Satıcılar (Asks)
+      asksList.innerHTML = (book.asks || []).slice(0, 5).reverse().map(item => `
+        <div class="row ask"><span>${item.price}</span><span style="text-align:right;">${item.quantity}</span></div>
+      `).join("") || '<div style="color:#555; padding:4px;">Satıcı yok</div>';
+
+      // Makas (Spread)
+      spreadBox.textContent = `Makas (Spread): ${book.spread || "0.00"}`;
+
+      // Alıcılar (Bids)
+      bidsList.innerHTML = (book.bids || []).slice(0, 5).map(item => `
+        <div class="row bid"><span>${item.price}</span><span style="text-align:right;">${item.quantity}</span></div>
+      `).join("") || '<div style="color:#555; padding:4px;">Alıcı yok</div>';
+    }
+
+    function renderTrades(trades) {
+      trades.forEach(t => {
+        const item = document.createElement("div");
+        item.className = "trade-item";
+        item.innerHTML = `
+          <span style="color:#0ecb81; font-weight:bold;">${t.price}</span>
+          <span style="text-align:center;">${t.quantity}</span>
+          <span style="text-align:right; color:#848e9c;">${new Date().toLocaleTimeString()}</span>
+        `;
+        tradesList.prepend(item);
+      });
+    }
+
+    function togglePriceInput() {
+      const isMarket = document.getElementById("order-type").value === "MARKET";
+      document.getElementById("price-group").style.display = isMarket ? "none" : "flex";
+    }
+
+    async function sendOrder(side) {
+      const type = document.getElementById("order-type").value;
+      const qty = document.getElementById("order-qty").value;
+      const price = type === "LIMIT" ? document.getElementById("order-price").value : null;
+
+      const payload = {
+        side: side,
+        order_type: type,
+        quantity: qty
+      };
+      if (price) payload.price = price;
+
+      await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
+  </script>
+</body>
+</html>
